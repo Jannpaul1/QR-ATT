@@ -3,14 +3,21 @@ import { StyleSheet, Text, View } from 'react-native';
 
 import { COLORS } from '@/constants/colors';
 
-type Props = { title: string };
+type Props = {
+  title: string;
+};
 
 export default function Header({ title }: Props) {
   return (
     <View style={styles.container}>
       <View style={styles.logoCircle}>
-        <MaterialIcons name="qr-code-2" size={36} color={COLORS.logo} />
+        <MaterialIcons
+          name="qr-code-2"
+          size={32}
+          color={COLORS.primary}
+        />
       </View>
+
       <Text style={styles.title}>{title}</Text>
     </View>
   );
@@ -18,20 +25,25 @@ export default function Header({ title }: Props) {
 
 const styles = StyleSheet.create({
   container: {
+    flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: 24,
+    paddingVertical: 12,
   },
+
   logoCircle: {
-    width: 72,
-    height: 72,
-    borderRadius: 36,
+    width: 52,
+    height: 52,
+    borderRadius: 10,
     backgroundColor: COLORS.surface,
     justifyContent: 'center',
     alignItems: 'center',
-    marginBottom: 12,
+    marginRight: 12,
+    borderWidth: 1,
+    borderColor: COLORS.border,
   },
+
   title: {
-    fontSize: 24,
+    fontSize: 22,
     fontWeight: '700',
     color: COLORS.textPrimary,
   },
