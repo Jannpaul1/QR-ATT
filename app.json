@@ -31,7 +31,10 @@
           "resizeMode": "contain",
           "backgroundColor": "#ffffff"
         }
-      ]
+      ],
+      "expo-image",
+      "expo-secure-store",
+      "expo-sqlite"
     ],
     "extra": {
       "router": {},
