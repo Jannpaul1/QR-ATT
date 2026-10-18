@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   FlatList,
   Pressable,
   StyleSheet,
@@ -13,6 +14,7 @@ import { useRouter } from 'expo-router';
 import { supabase } from '@/lib/supabase';
 
 type Role = 'student' | 'teacher' | 'admin';
+type AssignableRole = 'student' | 'teacher';
 
 type Profile = {
   id: string;
@@ -29,15 +31,18 @@ export default function ManageUsersScreen() {
   const [loading, setLoading] = useState(true);
   const [authorized, setAuthorized] = useState(false);
   const [error, setError] = useState('');
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [savingId, setSavingId] = useState<string | null>(null);
+  const [notice, setNotice] = useState('');
 
   const loadUsers = useCallback(async () => {
     setLoading(true);
     setError('');
+    setNotice('');
     setAuthorized(false);
     setUsers([]);
 
     try {
-      // Check the current authenticated session
       const { data: authData, error: authError } =
         await supabase.auth.getUser();
 
@@ -47,7 +52,6 @@ export default function ManageUsersScreen() {
         );
       }
 
-      // Verify administrator role from database
       const { data: profile, error: profileError } =
         await supabase
           .from('profiles')
@@ -67,7 +71,6 @@ export default function ManageUsersScreen() {
 
       setAuthorized(true);
 
-      // Retrieve all registered users
       const { data, error: usersError } = await supabase
         .from('profiles')
         .select('id, email, full_name, role')
@@ -80,9 +83,7 @@ export default function ManageUsersScreen() {
       setUsers((data ?? []) as Profile[]);
     } catch (err) {
       setError(
-        err instanceof Error
-          ? err.message
-          : 'Unable to load users.'
+        err instanceof Error ? err.message : 'Unable to load users.'
       );
     } finally {
       setLoading(false);
@@ -92,6 +93,112 @@ export default function ManageUsersScreen() {
   useEffect(() => {
     loadUsers();
   }, [loadUsers]);
+
+  const changeRole = async (
+    user: Profile,
+    newRole: AssignableRole
+  ) => {
+    if (
+      !authorized ||
+      user.role === 'admin' ||
+      user.role === newRole ||
+      savingId !== null
+    ) {
+      return;
+    }
+
+    setSavingId(user.id);
+    setNotice('');
+
+    try {
+      const { error: rpcError } = await supabase.rpc(
+        'admin_change_user_role',
+        {
+          p_user_id: user.id,
+          p_new_role: newRole,
+        }
+      );
+
+      if (rpcError) {
+        throw new Error(rpcError.message);
+      }
+
+      // Fetch the saved role from the database.
+      const { data: updated, error: fetchError } =
+        await supabase
+          .from('profiles')
+          .select('role')
+          .eq('id', user.id)
+          .single();
+
+      if (fetchError) {
+        throw new Error(
+          'Role change submitted, but verification failed: ' +
+            fetchError.message
+        );
+      }
+
+      if (updated?.role !== newRole) {
+        throw new Error(
+          'The database did not confirm the new role.'
+        );
+      }
+
+      setUsers((previous) =>
+        previous.map((item) =>
+          item.id === user.id
+            ? { ...item, role: newRole }
+            : item
+        )
+      );
+
+      setEditingId(null);
+      setNotice(
+        `${user.full_name || user.email} is now a ${newRole}.`
+      );
+    } catch (err) {
+      const message =
+        err instanceof Error
+          ? err.message
+          : 'Unable to change the user role.';
+
+      Alert.alert('Role Change Failed', message);
+      setNotice(`Error: ${message}`);
+    } finally {
+      setSavingId(null);
+    }
+  };
+
+  const confirmRoleChange = (
+    user: Profile,
+    newRole: AssignableRole
+  ) => {
+    if (user.role === 'admin' || user.role === newRole) {
+      return;
+    }
+
+    const name = user.full_name || user.email;
+    const message =
+      `Change ${name} from ${user.role} to ${newRole}?`;
+
+    // Browser confirmation for Expo Web.
+    if (typeof window !== 'undefined' &&
+        typeof window.confirm === 'function') {
+      if (window.confirm(message)) {
+        void changeRole(user, newRole);
+      }
+      return;
+    }
+
+    // Native Android/iOS confirmation.
+    Alert.alert('Confirm Role Change', message, [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Confirm',
+        onPress: () => void changeRole(user, newRole),
+      },
+    ]);
+  };
 
   const filteredUsers = users.filter((item) => {
     const keyword = search.toLowerCase().trim();
@@ -114,7 +221,7 @@ export default function ManageUsersScreen() {
 
       <Text style={styles.title}>Manage Users</Text>
       <Text style={styles.subtitle}>
-        View registered QR-ATT accounts
+        View and manage registered QR-ATT accounts
       </Text>
 
       {loading ? (
@@ -128,19 +235,12 @@ export default function ManageUsersScreen() {
         <View style={styles.center}>
           <Text style={styles.error}>{error}</Text>
 
-          <Pressable
-            style={styles.refresh}
-            onPress={loadUsers}
-          >
+          <Pressable style={styles.refresh} onPress={loadUsers}>
             <Text style={styles.refreshText}>Try Again</Text>
           </Pressable>
 
-          <Pressable
-            onPress={() => router.replace('/login')}
-          >
-            <Text style={styles.loginLink}>
-              Go to Login
-            </Text>
+          <Pressable onPress={() => router.replace('/login')}>
+            <Text style={styles.loginLink}>Go to Login</Text>
           </Pressable>
         </View>
       ) : authorized ? (
@@ -162,6 +262,17 @@ export default function ManageUsersScreen() {
             </Text>
           </View>
 
+          {notice ? (
+            <Text
+              style={[
+                styles.notice,
+                notice.startsWith('Error:') && styles.errorNotice,
+              ]}
+            >
+              {notice}
+            </Text>
+          ) : null}
+
           <FlatList
             data={filteredUsers}
             keyExtractor={(item) => item.id}
@@ -171,43 +282,126 @@ export default function ManageUsersScreen() {
                 No matching users found.
               </Text>
             }
-            renderItem={({ item }) => (
-              <View style={styles.card}>
-                <View style={styles.cardHeader}>
-                  <View style={styles.avatar}>
-                    <Text style={styles.avatarText}>
-                      {(item.full_name || item.email)
-                        .charAt(0)
-                        .toUpperCase()}
-                    </Text>
+            renderItem={({ item }) => {
+              const isEditing = editingId === item.id;
+              const isSaving = savingId === item.id;
+              const isAdmin = item.role === 'admin';
+
+              return (
+                <View style={styles.card}>
+                  <View style={styles.cardHeader}>
+                    <View style={styles.avatar}>
+                      <Text style={styles.avatarText}>
+                        {(item.full_name || item.email)
+                          .charAt(0)
+                          .toUpperCase()}
+                      </Text>
+                    </View>
+
+                    <View style={styles.userInfo}>
+                      <Text style={styles.name}>
+                        {item.full_name || 'Unnamed User'}
+                      </Text>
+
+                      <Text style={styles.email}>
+                        {item.email}
+                      </Text>
+                    </View>
                   </View>
 
-                  <View style={styles.userInfo}>
-                    <Text style={styles.name}>
-                      {item.full_name || 'Unnamed User'}
-                    </Text>
+                  <View style={styles.roleRow}>
+                    <View style={styles.badge}>
+                      <Text style={styles.badgeText}>
+                        {isAdmin
+                          ? 'Administrator'
+                          : item.role === 'teacher'
+                          ? 'Teacher'
+                          : 'Student'}
+                      </Text>
+                    </View>
 
-                    <Text style={styles.email}>
-                      {item.email}
-                    </Text>
+                    {!isAdmin && (
+                      <Pressable
+                        style={styles.editButton}
+                        disabled={savingId !== null}
+                        onPress={() =>
+                          setEditingId(
+                            isEditing ? null : item.id
+                          )
+                        }
+                      >
+                        <Text style={styles.editText}>
+                          {isEditing ? 'Cancel' : 'Change Role'}
+                        </Text>
+                      </Pressable>
+                    )}
                   </View>
-                </View>
 
-                <View style={styles.badge}>
-                  <Text style={styles.badgeText}>
-                    {item.role === 'admin'
-                      ? 'Administrator'
-                      : item.role === 'teacher'
-                      ? 'Teacher'
-                      : 'Student'}
-                  </Text>
+                  {isAdmin && (
+                    <Text style={styles.protected}>
+                      Administrator account is protected.
+                    </Text>
+                  )}
+
+                  {isEditing && !isAdmin && (
+                    <View style={styles.roleEditor}>
+                      <Text style={styles.editorTitle}>
+                        Assign a new role
+                      </Text>
+
+                      {isSaving ? (
+                        <ActivityIndicator color="#168365" />
+                      ) : (
+                        <View style={styles.roleOptions}>
+                          <Pressable
+                            style={[
+                              styles.option,
+                              item.role === 'student' &&
+                                styles.selectedOption,
+                            ]}
+                            disabled={
+                              savingId !== null ||
+                              item.role === 'student'
+                            }
+                            onPress={() =>
+                              confirmRoleChange(item, 'student')
+                            }
+                          >
+                            <Text style={styles.optionText}>
+                              Student
+                            </Text>
+                          </Pressable>
+
+                          <Pressable
+                            style={[
+                              styles.option,
+                              item.role === 'teacher' &&
+                                styles.selectedOption,
+                            ]}
+                            disabled={
+                              savingId !== null ||
+                              item.role === 'teacher'
+                            }
+                            onPress={() =>
+                              confirmRoleChange(item, 'teacher')
+                            }
+                          >
+                            <Text style={styles.optionText}>
+                              Teacher
+                            </Text>
+                          </Pressable>
+                        </View>
+                      )}
+                    </View>
+                  )}
                 </View>
-              </View>
-            )}
+              );
+            }}
           />
 
           <Pressable
             style={styles.refresh}
+            disabled={savingId !== null}
             onPress={loadUsers}
           >
             <Text style={styles.refreshText}>
@@ -283,6 +477,14 @@ const styles = StyleSheet.create({
   total: {
     color: '#64748b',
   },
+  notice: {
+    color: '#168365',
+    fontWeight: '600',
+    marginBottom: 12,
+  },
+  errorNotice: {
+    color: '#dc2626',
+  },
   listContent: {
     paddingBottom: 20,
   },
@@ -326,6 +528,13 @@ const styles = StyleSheet.create({
     color: '#64748b',
     fontSize: 13,
   },
+  roleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    flexWrap: 'wrap',
+    gap: 10,
+  },
   badge: {
     backgroundColor: '#e1f5eb',
     paddingHorizontal: 12,
@@ -337,6 +546,55 @@ const styles = StyleSheet.create({
     color: '#168365',
     fontWeight: 'bold',
     fontSize: 12,
+  },
+  editButton: {
+    borderWidth: 1,
+    borderColor: '#168365',
+    borderRadius: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+  },
+  editText: {
+    color: '#168365',
+    fontWeight: 'bold',
+    fontSize: 13,
+  },
+  protected: {
+    color: '#64748b',
+    fontSize: 12,
+    marginTop: 8,
+  },
+  roleEditor: {
+    marginTop: 14,
+    padding: 14,
+    backgroundColor: '#f1f7f4',
+    borderRadius: 10,
+  },
+  editorTitle: {
+    fontWeight: 'bold',
+    color: '#162c25',
+    marginBottom: 12,
+  },
+  roleOptions: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  option: {
+    flex: 1,
+    padding: 12,
+    borderRadius: 8,
+    backgroundColor: '#fff',
+    borderWidth: 1,
+    borderColor: '#dbe3e8',
+    alignItems: 'center',
+  },
+  selectedOption: {
+    backgroundColor: '#d1fae5',
+    borderColor: '#168365',
+  },
+  optionText: {
+    color: '#162c25',
+    fontWeight: '600',
   },
   refresh: {
     backgroundColor: '#168365',
