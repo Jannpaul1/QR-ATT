@@ -137,7 +137,7 @@ export default function ManageEventsScreen() {
   return (
     <View style={styles.container}>
       <Pressable
-        onPress={() => router.back()}
+        onPress={() => router.replace('/')}
         style={styles.backButton}
       >
         <Text style={styles.back}>← Back</Text>

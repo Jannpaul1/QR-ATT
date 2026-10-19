@@ -19,6 +19,16 @@ type QRPayload = {
   event_code: string;
 };
 
+type EventData = {
+  id: string;
+  title: string;
+  event_code: string;
+  event_date: string | null;
+  start_time: string | null;
+  end_time: string | null;
+  status: string | null;
+};
+
 export default function ScanQRScreen() {
   const router = useRouter();
   const [permission, requestPermission] = useCameraPermissions();
@@ -26,6 +36,8 @@ export default function ScanQRScreen() {
   const [processing, setProcessing] = useState(false);
   const [message, setMessage] = useState('');
   const [success, setSuccess] = useState(false);
+  const [eventName, setEventName] = useState('');
+
   const scanLocked = useRef(false);
 
   const handleScan = useCallback(
@@ -36,32 +48,48 @@ export default function ScanQRScreen() {
       setProcessing(true);
       setMessage('');
       setSuccess(false);
+      setEventName('');
+
+      console.log('QR CODE DETECTED:', data);
 
       try {
+        // STEP 1: Validate QR code format
         let payload: QRPayload;
 
         try {
           payload = JSON.parse(data);
         } catch {
-          throw new Error('This is not a valid QR-ATT event code.');
+          throw new Error(
+            'Invalid QR code. Please scan a QR-ATT event code.'
+          );
         }
 
         if (
+          payload === null ||
+          typeof payload !== 'object' ||
           payload.type !== 'QR_ATT_EVENT' ||
           payload.version !== 1 ||
           typeof payload.event_id !== 'string' ||
-          typeof payload.event_code !== 'string'
+          typeof payload.event_code !== 'string' ||
+          !payload.event_id.trim() ||
+          !payload.event_code.trim()
         ) {
           throw new Error('Invalid QR-ATT event code.');
         }
 
+        // STEP 2: Verify signed-in user
         const { data: auth, error: authError } =
           await supabase.auth.getUser();
 
         if (authError || !auth.user) {
-          throw new Error('Please sign in to scan attendance.');
+          throw new Error(
+            'Please sign in to your student account first.'
+          );
         }
 
+        console.log('Authenticated user:', auth.user.id);
+
+        // STEP 3: Verify student role
         const { data: profile, error: profileError } =
           await supabase
             .from('profiles')
@@ -70,7 +98,10 @@ export default function ScanQRScreen() {
             .single();
 
         if (profileError) {
-          throw new Error(profileError.message);
+          throw new Error(
+            'Unable to verify your account: ' +
+              profileError.message
+          );
         }
 
         if (profile?.role !== 'student') {
@@ -79,28 +110,116 @@ export default function ScanQRScreen() {
           );
         }
 
-        // Verify that the QR event exists and its code matches.
+        // STEP 4: Verify event and QR code
         const { data: event, error: eventError } =
           await supabase
             .from('events')
-            .select('id, title, event_code')
+            .select(
+              'id, title, event_code, event_date, start_time, end_time, status'
+            )
             .eq('id', payload.event_id)
             .eq('event_code', payload.event_code)
             .single();
 
         if (eventError || !event) {
-          throw new Error('Event not found or QR code is invalid.');
+          console.error('Event lookup error:', eventError);
+
+          throw new Error(
+            'Event not found. Please scan a valid event QR code.'
+          );
         }
 
-        // Database RLS enforces student role, event status,
-        // and event start/end time. The unique constraint
-        // prevents multiple records for one student/event.
+        const currentEvent = event as EventData;
+        setEventName(currentEvent.title);
+
+        console.log('EVENT FOUND:', currentEvent.title);
+
+        // STEP 5: Validate event status
+        if (currentEvent.status?.toLowerCase() !== 'open') {
+          throw new Error(
+            'Attendance is closed for this event.'
+          );
+        }
+
+        // STEP 6: Validate event date and time
+        const now = new Date();
+
+        if (currentEvent.event_date) {
+          const today = [
+            now.getFullYear(),
+            String(now.getMonth() + 1).padStart(2, '0'),
+            String(now.getDate()).padStart(2, '0'),
+          ].join('-');
+
+          if (currentEvent.event_date !== today) {
+            throw new Error(
+              'Attendance is only available on the event date.'
+            );
+          }
+        }
+
+        if (currentEvent.start_time) {
+          const start = new Date(currentEvent.start_time);
+
+          if (
+            !Number.isNaN(start.getTime()) &&
+            now < start
+          ) {
+            throw new Error(
+              'Attendance has not started for this event.'
+            );
+          }
+        }
+
+        if (currentEvent.end_time) {
+          const end = new Date(currentEvent.end_time);
+
+          if (
+            !Number.isNaN(end.getTime()) &&
+            now > end
+          ) {
+            throw new Error(
+              'Attendance has already ended for this event.'
+            );
+          }
+        }
+
+        // STEP 7: Check existing attendance
+        const { data: existing, error: existingError } =
+          await supabase
+            .from('attendance')
+            .select('id')
+            .eq('student_id', auth.user.id)
+            .eq('event_id', currentEvent.id)
+            .maybeSingle();
+
+        if (existingError) {
+          throw new Error(
+            'Unable to check attendance: ' +
+              existingError.message
+          );
+        }
+
+        if (existing) {
+          throw new Error(
+            'You have already recorded attendance for this event.'
+          );
+        }
+
+        // STEP 8: Save attendance to Supabase
+        console.log('SAVING ATTENDANCE...');
+
         const { error: insertError } = await supabase
           .from('attendance')
           .insert({
             student_id: auth.user.id,
-            event_id: event.id,
+            event_id: currentEvent.id,
           });
+
+        console.log(
+          'ATTENDANCE INSERT ERROR:',
+          insertError
+        );
 
         if (insertError) {
           if (insertError.code === '23505') {
@@ -111,18 +230,26 @@ export default function ScanQRScreen() {
 
           if (insertError.code === '42501') {
             throw new Error(
-              'Attendance is not allowed. Check that the event is open and currently in progress.'
+              'Supabase denied attendance. Check the event schedule and database permissions.'
             );
           }
 
-          throw new Error(insertError.message);
+          throw new Error(
+            'Unable to save attendance: ' +
+              insertError.message
+          );
         }
+
+        // STEP 9: Show success
+        console.log('ATTENDANCE SAVED SUCCESSFULLY');
 
         setSuccess(true);
         setMessage(
-          `Attendance successfully recorded for ${event.title}!`
+          'Your attendance has been recorded successfully!'
         );
       } catch (err) {
+        console.error('QR-ATT SCAN ERROR:', err);
+
         setSuccess(false);
         setMessage(
           err instanceof Error
@@ -140,6 +267,7 @@ export default function ScanQRScreen() {
     scanLocked.current = false;
     setMessage('');
     setSuccess(false);
+    setEventName('');
   };
 
   if (!permission) {
@@ -154,7 +282,10 @@ export default function ScanQRScreen() {
   if (!permission.granted) {
     return (
       <View style={styles.center}>
-        <Text style={styles.title}>Camera Permission</Text>
+        <Text style={styles.title}>
+          Camera Permission Required
+        </Text>
+
         <Text style={styles.description}>
           QR-ATT needs camera access to scan school event QR codes.
         </Text>
@@ -184,9 +315,12 @@ export default function ScanQRScreen() {
         <Text style={styles.back}>← Back</Text>
       </Pressable>
 
-      <Text style={styles.title}>Scan Event QR Code</Text>
+      <Text style={styles.title}>
+        Scan Event QR Code
+      </Text>
+
       <Text style={styles.description}>
-        Point your camera at the QR code displayed by your teacher.
+        Point your camera at the event QR code displayed by your teacher.
       </Text>
 
       <View style={styles.cameraContainer}>
@@ -197,15 +331,23 @@ export default function ScanQRScreen() {
             barcodeTypes: ['qr'],
           }}
           onBarcodeScanned={
-            scanLocked.current ? undefined : handleScan
+            processing || message
+              ? undefined
+              : handleScan
           }
         />
       </View>
 
       {processing && (
         <View style={styles.status}>
-          <ActivityIndicator color="#168365" />
-          <Text>Recording attendance...</Text>
+          <ActivityIndicator
+            size="large"
+            color="#168365"
+          />
+
+          <Text style={styles.muted}>
+            Verifying event and recording attendance...
+          </Text>
         </View>
       )}
 
@@ -213,11 +355,36 @@ export default function ScanQRScreen() {
         <View
           style={[
             styles.messageBox,
-            success ? styles.successBox : styles.errorBox,
+            success
+              ? styles.successBox
+              : styles.errorBox,
           ]}
         >
           <Text
-            style={success ? styles.successText : styles.errorText}
+            style={[
+              styles.messageTitle,
+              success
+                ? styles.successText
+                : styles.errorText,
+            ]}
+          >
+            {success
+              ? 'Attendance Recorded!'
+              : 'Attendance Not Recorded'}
+          </Text>
+
+          {eventName ? (
+            <Text style={styles.eventName}>
+              {eventName}
+            </Text>
+          ) : null}
+
+          <Text
+            style={
+              success
+                ? styles.successText
+                : styles.errorText
+            }
           >
             {message}
           </Text>
@@ -225,9 +392,29 @@ export default function ScanQRScreen() {
       ) : null}
 
       {message && !processing ? (
-        <Pressable style={styles.button} onPress={scanAgain}>
-          <Text style={styles.buttonText}>Scan Again</Text>
-        </Pressable>
+        <>
+          {success && (
+            <Pressable
+              style={styles.button}
+              onPress={() =>
+                router.push('/attendance-history')
+              }
+            >
+              <Text style={styles.buttonText}>
+                View Attendance History
+              </Text>
+            </Pressable>
+          )}
+
+          <Pressable
+            style={styles.secondaryButton}
+            onPress={scanAgain}
+          >
+            <Text style={styles.secondaryText}>
+              Scan Again
+            </Text>
+          </Pressable>
+        </>
       ) : null}
     </ScrollView>
   );
@@ -248,6 +435,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     padding: 24,
     gap: 18,
+    backgroundColor: '#f5f7f6',
   },
   back: {
     color: '#168365',
@@ -283,10 +471,20 @@ const styles = StyleSheet.create({
     gap: 10,
     marginTop: 20,
   },
+  muted: {
+    color: '#64748b',
+    textAlign: 'center',
+  },
   messageBox: {
-    padding: 16,
-    borderRadius: 10,
+    padding: 20,
+    borderRadius: 12,
     marginTop: 20,
+    alignItems: 'center',
+    gap: 10,
+  },
+  messageTitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
   },
   successBox: {
     backgroundColor: '#dcfce7',
@@ -296,11 +494,16 @@ const styles = StyleSheet.create({
   },
   successText: {
     color: '#166534',
-    fontWeight: '600',
     textAlign: 'center',
   },
   errorText: {
     color: '#991b1b',
+    textAlign: 'center',
+  },
+  eventName: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    color: '#162c25',
     textAlign: 'center',
   },
   button: {
@@ -312,6 +515,18 @@ const styles = StyleSheet.create({
   },
   buttonText: {
     color: '#fff',
+    fontWeight: 'bold',
+  },
+  secondaryButton: {
+    borderWidth: 1,
+    borderColor: '#168365',
+    padding: 15,
+    borderRadius: 10,
+    alignItems: 'center',
+    marginTop: 12,
+  },
+  secondaryText: {
+    color: '#168365',
     fontWeight: 'bold',
   },
 });

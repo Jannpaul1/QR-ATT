@@ -15,6 +15,53 @@ import { supabase } from '@/lib/supabase';
 
 type Role = 'student' | 'teacher' | 'admin';
 
+const PH_TIMEZONE_OFFSET = '+08:00';
+
+function convertPhilippineTimeToUTC(
+  date: string,
+  time: string
+): Date | null {
+  const dateTime = new Date(
+    `${date}T${time}:00${PH_TIMEZONE_OFFSET}`
+  );
+
+  if (Number.isNaN(dateTime.getTime())) {
+    return null;
+  }
+
+  // Confirm that the entered date and time are valid
+  // after converting back to Philippine time.
+  const phParts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Manila',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(dateTime);
+
+  const getPart = (type: string) =>
+    phParts.find((part) => part.type === type)?.value;
+
+  const actualDate = [
+    getPart('year'),
+    getPart('month'),
+    getPart('day'),
+  ].join('-');
+
+  const actualTime = [
+    getPart('hour'),
+    getPart('minute'),
+  ].join(':');
+
+  if (actualDate !== date || actualTime !== time) {
+    return null;
+  }
+
+  return dateTime;
+}
+
 export default function CreateEventScreen() {
   const router = useRouter();
 
@@ -62,7 +109,9 @@ export default function CreateEventScreen() {
           );
         }
 
-        if (active) setRole(profile.role as Role);
+        if (active) {
+          setRole(profile.role as Role);
+        }
       } catch (err) {
         if (active) {
           setError(
@@ -72,7 +121,9 @@ export default function CreateEventScreen() {
           );
         }
       } finally {
-        if (active) setChecking(false);
+        if (active) {
+          setChecking(false);
+        }
       }
     }
 
@@ -104,24 +155,35 @@ export default function CreateEventScreen() {
       !timeValid.test(startTime) ||
       !timeValid.test(endTime)
     ) {
-      setError('Use YYYY-MM-DD for date and HH:MM for time.');
+      setError(
+        'Use YYYY-MM-DD for date and HH:MM for time.'
+      );
       return;
     }
 
-    // Interpret the entered date and time in the device's
-    // local timezone, then store as UTC ISO timestamps.
-    const start = new Date(`${eventDate}T${startTime}:00`);
-    const end = new Date(`${eventDate}T${endTime}:00`);
+    // Always interpret input as Philippine time (UTC+8).
+    // This works even when the device uses another timezone.
+    const start = convertPhilippineTimeToUTC(
+      eventDate,
+      startTime
+    );
 
-    if (
-      Number.isNaN(start.getTime()) ||
-      Number.isNaN(end.getTime()) ||
-      start.getFullYear() !== Number(eventDate.slice(0, 4)) ||
-      start.getMonth() + 1 !== Number(eventDate.slice(5, 7)) ||
-      start.getDate() !== Number(eventDate.slice(8, 10)) ||
-      end.getTime() <= start.getTime()
-    ) {
-      setError('Enter a valid date and an end time after the start.');
+    const end = convertPhilippineTimeToUTC(
+      eventDate,
+      endTime
+    );
+
+    if (!start || !end) {
+      setError(
+        'Please enter a valid Philippine date and time.'
+      );
+      return;
+    }
+
+    if (end.getTime() <= start.getTime()) {
+      setError(
+        'End time must be later than start time.'
+      );
       return;
     }
 
@@ -133,14 +195,49 @@ export default function CreateEventScreen() {
         await supabase.auth.getUser();
 
       if (authError || !auth.user) {
-        throw new Error('Your session has expired. Sign in again.');
+        throw new Error(
+          'Your session has expired. Sign in again.'
+        );
+      }
+
+      // Verify access again before saving.
+      const { data: profile, error: profileError } =
+        await supabase
+          .from('profiles')
+          .select('role')
+          .eq('id', auth.user.id)
+          .single();
+
+      if (profileError) {
+        throw new Error(profileError.message);
+      }
+
+      if (
+        profile?.role !== 'teacher' &&
+        profile?.role !== 'admin'
+      ) {
+        throw new Error(
+          'Only teachers and administrators can create events.'
+        );
       }
 
       const eventCode =
         'EVT-' +
         Date.now().toString(36).toUpperCase() +
         '-' +
-        Math.random().toString(36).slice(2, 8).toUpperCase();
+        Math.random()
+          .toString(36)
+          .slice(2, 8)
+          .toUpperCase();
+
+      console.log('CREATING QR-ATT EVENT:', {
+        title: title.trim(),
+        eventDate,
+        startTimePhilippines: startTime,
+        endTimePhilippines: endTime,
+        startTimeUTC: start.toISOString(),
+        endTimeUTC: end.toISOString(),
+      });
 
       const { error: insertError } = await supabase
         .from('events')
@@ -160,13 +257,21 @@ export default function CreateEventScreen() {
         throw new Error(insertError.message);
       }
 
-      Alert.alert(
-        'Success',
-        'Your event has been created successfully.'
-      );
+      if (typeof window !== 'undefined') {
+        window.alert(
+          'Event created successfully! The schedule uses Philippine time.'
+        );
+      } else {
+        Alert.alert(
+          'Success',
+          'Your event has been created successfully.'
+        );
+      }
 
       router.back();
     } catch (err) {
+      console.error('EVENT CREATION ERROR:', err);
+
       setError(
         err instanceof Error
           ? err.message
@@ -180,7 +285,10 @@ export default function CreateEventScreen() {
   if (checking) {
     return (
       <View style={styles.center}>
-        <ActivityIndicator size="large" color="#168365" />
+        <ActivityIndicator
+          size="large"
+          color="#168365"
+        />
         <Text>Checking access...</Text>
       </View>
     );
@@ -190,6 +298,7 @@ export default function CreateEventScreen() {
     return (
       <View style={styles.center}>
         <Text style={styles.error}>{error}</Text>
+
         <Pressable onPress={() => router.back()}>
           <Text style={styles.back}>Go Back</Text>
         </Pressable>
@@ -206,12 +315,19 @@ export default function CreateEventScreen() {
         <Text style={styles.back}>← Back</Text>
       </Pressable>
 
-      <Text style={styles.title}>Create Event</Text>
-      <Text style={styles.subtitle}>
-        Add a new school event for QR attendance.
+      <Text style={styles.title}>
+        Create Event
       </Text>
 
-      <Text style={styles.label}>Event Title *</Text>
+      <Text style={styles.subtitle}>
+        Add a new school event for QR attendance.
+        All times are in Philippine Standard Time (UTC+8).
+      </Text>
+
+      <Text style={styles.label}>
+        Event Title *
+      </Text>
+
       <TextInput
         style={styles.input}
         placeholder="e.g. School Foundation Day"
@@ -219,31 +335,44 @@ export default function CreateEventScreen() {
         onChangeText={setTitle}
       />
 
-      <Text style={styles.label}>Event Date *</Text>
+      <Text style={styles.label}>
+        Event Date *
+      </Text>
+
       <TextInput
         style={styles.input}
         placeholder="YYYY-MM-DD"
         value={eventDate}
         onChangeText={setEventDate}
+        autoCapitalize="none"
       />
 
-      <Text style={styles.label}>Start Time *</Text>
+      <Text style={styles.label}>
+        Start Time * (Philippine Time)
+      </Text>
+
       <TextInput
         style={styles.input}
-        placeholder="HH:MM (24-hour format)"
+        placeholder="HH:MM (e.g. 14:20)"
         value={startTime}
         onChangeText={setStartTime}
       />
 
-      <Text style={styles.label}>End Time *</Text>
+      <Text style={styles.label}>
+        End Time * (Philippine Time)
+      </Text>
+
       <TextInput
         style={styles.input}
-        placeholder="HH:MM (24-hour format)"
+        placeholder="HH:MM (e.g. 15:30)"
         value={endTime}
         onChangeText={setEndTime}
       />
 
-      <Text style={styles.label}>Venue</Text>
+      <Text style={styles.label}>
+        Venue
+      </Text>
+
       <TextInput
         style={styles.input}
         placeholder="e.g. School Gymnasium"
@@ -251,9 +380,15 @@ export default function CreateEventScreen() {
         onChangeText={setVenue}
       />
 
-      <Text style={styles.label}>Description</Text>
+      <Text style={styles.label}>
+        Description
+      </Text>
+
       <TextInput
-        style={[styles.input, styles.multiline]}
+        style={[
+          styles.input,
+          styles.multiline,
+        ]}
         placeholder="Enter event details..."
         value={description}
         onChangeText={setDescription}
@@ -262,7 +397,9 @@ export default function CreateEventScreen() {
       />
 
       {error ? (
-        <Text style={styles.error}>{error}</Text>
+        <Text style={styles.error}>
+          {error}
+        </Text>
       ) : null}
 
       <Pressable
@@ -276,7 +413,9 @@ export default function CreateEventScreen() {
         {saving ? (
           <ActivityIndicator color="#fff" />
         ) : (
-          <Text style={styles.saveText}>Save Event</Text>
+          <Text style={styles.saveText}>
+            Save Event
+          </Text>
         )}
       </Pressable>
     </ScrollView>

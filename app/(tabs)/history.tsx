@@ -1,6 +1,8 @@
+
 import { useFocusEffect } from 'expo-router';
 import { useCallback, useState } from 'react';
 import {
+  ActivityIndicator,
   FlatList,
   StyleSheet,
   Text,
@@ -19,45 +21,67 @@ import {
 
 export default function HistoryScreen() {
   const [role, setRole] = useState<Role | null>(null);
+
   const [studentRecords, setStudentRecords] = useState<
     AttendanceRecord[]
   >([]);
+
   const [teacherEvents, setTeacherEvents] = useState<
     TeacherEventAttendance[]
   >([]);
+
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
 
   const { user } = useAuth();
 
   const loadHistory = useCallback(async () => {
     if (!user) {
+      setRole(null);
+      setStudentRecords([]);
+      setTeacherEvents([]);
       setLoading(false);
       return;
     }
 
     setLoading(true);
+    setError('');
 
     try {
-      const currentRole =
-        (await getUserRole(user.id)) ?? 'student';
+      const currentRole = await getUserRole(user.id);
+
+      if (!currentRole) {
+        throw new Error('Unable to verify your account role.');
+      }
 
       setRole(currentRole);
 
       if (currentRole === 'teacher') {
-        const events =
-          await getTeacherEventAttendance(user.id);
+        const events = await getTeacherEventAttendance(
+          user.id
+        );
 
         setTeacherEvents(events);
         setStudentRecords([]);
-      } else {
-        const records =
-          await getAttendanceHistory(user.id);
+      } else if (currentRole === 'student') {
+        const records = await getAttendanceHistory(
+          user.id
+        );
 
         setStudentRecords(records);
         setTeacherEvents([]);
+      } else {
+        setStudentRecords([]);
+        setTeacherEvents([]);
       }
-    } catch (error) {
-      console.log('History loading error:', error);
+    } catch (err) {
+      console.error('History loading error:', err);
+
+      setError(
+        err instanceof Error
+          ? err.message
+          : 'Unable to load attendance history.'
+      );
 
       setStudentRecords([]);
       setTeacherEvents([]);
@@ -68,19 +92,30 @@ export default function HistoryScreen() {
 
   useFocusEffect(
     useCallback(() => {
-      loadHistory();
+      void loadHistory();
     }, [loadHistory])
   );
 
   if (loading) {
     return (
-      <View style={styles.container}>
-        <Text style={styles.title}>
-          Attendance History
-        </Text>
+      <View style={styles.center}>
+        <ActivityIndicator
+          size="large"
+          color={COLORS.primary}
+        />
 
         <Text style={styles.subtitle}>
-          Loading records...
+          Loading attendance records...
+        </Text>
+      </View>
+    );
+  }
+
+  if (error) {
+    return (
+      <View style={styles.center}>
+        <Text style={styles.error}>
+          {error}
         </Text>
       </View>
     );
@@ -91,6 +126,10 @@ export default function HistoryScreen() {
       <View style={styles.container}>
         <Text style={styles.title}>
           Attendance History
+        </Text>
+
+        <Text style={styles.timezoneNote}>
+          All times are shown in Philippine Time (PHT).
         </Text>
 
         {teacherEvents.length === 0 ? (
@@ -128,7 +167,7 @@ export default function HistoryScreen() {
                 )}
 
                 <Text style={styles.attendeesTitle}>
-                  Students
+                  Students ({item.attendeeCount})
                 </Text>
 
                 {item.attendees.length === 0 ? (
@@ -141,13 +180,21 @@ export default function HistoryScreen() {
                       key={`${attendee.studentId}-${attendee.scannedAt}`}
                       style={styles.attendeeRow}
                     >
-                      <Text style={styles.studentId}>
-                        {shortId(attendee.studentId)}
-                      </Text>
+                      <View style={styles.attendeeInfo}>
+                        <Text style={styles.studentId}>
+                          Student: {shortId(attendee.studentId)}
+                        </Text>
 
-                      <Text style={styles.scanTime}>
-                        {formatDate(attendee.scannedAt)}
-                      </Text>
+                        <Text style={styles.scanTime}>
+                          Scanned: {formatDate(attendee.scannedAt)}
+                        </Text>
+                      </View>
+
+                      <View style={styles.presentBadge}>
+                        <Text style={styles.presentText}>
+                          Present
+                        </Text>
+                      </View>
                     </View>
                   ))
                 )}
@@ -159,16 +206,35 @@ export default function HistoryScreen() {
     );
   }
 
+  if (role === 'admin') {
+    return (
+      <View style={styles.container}>
+        <Text style={styles.title}>
+          Attendance History
+        </Text>
+
+        <Text style={styles.subtitle}>
+          Administrators can review attendance through
+          Attendance Monitoring and Reports.
+        </Text>
+      </View>
+    );
+  }
+
   return (
     <View style={styles.container}>
       <Text style={styles.title}>
-        Attendance History
+        My Attendance History
+      </Text>
+
+      <Text style={styles.timezoneNote}>
+        All times are shown in Philippine Time (PHT).
       </Text>
 
       {studentRecords.length === 0 ? (
         <Text style={styles.subtitle}>
-          No records yet. Scan a QR code to register
-          your attendance.
+          No records yet. Scan an event QR code to
+          register your attendance.
         </Text>
       ) : (
         <FlatList
@@ -177,15 +243,27 @@ export default function HistoryScreen() {
           contentContainerStyle={styles.list}
           renderItem={({ item }) => (
             <View style={styles.card}>
-              <Text style={styles.eventTitle}>
-                {item.eventTitle}
-              </Text>
+              <View style={styles.headerRow}>
+                <Text style={styles.eventTitle}>
+                  {item.eventTitle}
+                </Text>
+
+                <View style={styles.presentBadge}>
+                  <Text style={styles.presentText}>
+                    Present
+                  </Text>
+                </View>
+              </View>
 
               <Text style={styles.eventMeta}>
                 {item.eventId}
               </Text>
 
-              <Text style={styles.eventMeta}>
+              <Text style={styles.dateLabel}>
+                Attendance Recorded
+              </Text>
+
+              <Text style={styles.dateValue}>
                 {formatDate(item.scannedAt)}
               </Text>
             </View>
@@ -201,7 +279,23 @@ function shortId(id: string) {
 }
 
 function formatDate(iso: string) {
-  return new Date(iso).toLocaleString();
+  if (!iso) return 'Not available';
+
+  const date = new Date(iso);
+
+  if (Number.isNaN(date.getTime())) {
+    return 'Invalid date';
+  }
+
+  return date.toLocaleString('en-PH', {
+    timeZone: 'Asia/Manila',
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+  }) + ' PHT';
 }
 
 const styles = StyleSheet.create({
@@ -212,11 +306,25 @@ const styles = StyleSheet.create({
     paddingTop: 24,
   },
 
+  center: {
+    flex: 1,
+    backgroundColor: COLORS.background,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 24,
+  },
+
   title: {
     fontSize: 20,
-    fontWeight: '600',
+    fontWeight: '700',
     color: COLORS.textPrimary,
-    marginBottom: 16,
+    marginBottom: 8,
+  },
+
+  timezoneNote: {
+    fontSize: 12,
+    color: COLORS.textSecondary,
+    marginBottom: 18,
   },
 
   subtitle: {
@@ -224,11 +332,17 @@ const styles = StyleSheet.create({
     color: COLORS.textSecondary,
     textAlign: 'center',
     lineHeight: 20,
-    marginTop: 32,
+    marginTop: 24,
+  },
+
+  error: {
+    fontSize: 14,
+    color: '#DC2626',
+    textAlign: 'center',
   },
 
   list: {
-    paddingBottom: 24,
+    paddingBottom: 30,
   },
 
   card: {
@@ -250,7 +364,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    marginBottom: 6,
+    marginBottom: 8,
   },
 
   eventTitle: {
@@ -258,13 +372,39 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '600',
     color: COLORS.textPrimary,
-    marginBottom: 4,
+    marginRight: 12,
   },
 
   eventMeta: {
-    fontSize: 13,
+    fontSize: 12,
     color: COLORS.textSecondary,
-    marginTop: 2,
+    marginTop: 3,
+  },
+
+  dateLabel: {
+    fontSize: 12,
+    color: COLORS.textSecondary,
+    marginTop: 12,
+    marginBottom: 3,
+  },
+
+  dateValue: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: COLORS.textPrimary,
+  },
+
+  presentBadge: {
+    backgroundColor: '#DCFCE7',
+    borderRadius: 20,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+  },
+
+  presentText: {
+    color: '#166534',
+    fontSize: 12,
+    fontWeight: '700',
   },
 
   countBadge: {
@@ -294,7 +434,14 @@ const styles = StyleSheet.create({
   attendeeRow: {
     borderTopWidth: 1,
     borderTopColor: COLORS.border,
-    paddingVertical: 8,
+    paddingVertical: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+
+  attendeeInfo: {
+    flex: 1,
   },
 
   studentId: {
@@ -306,7 +453,7 @@ const styles = StyleSheet.create({
   scanTime: {
     fontSize: 11,
     color: COLORS.textSecondary,
-    marginTop: 2,
+    marginTop: 4,
   },
 
   noAttendees: {
